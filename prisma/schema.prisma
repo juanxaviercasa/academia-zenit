@@ -1,0 +1,335 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ==========================================
+// 1. USUARIOS Y PERFILES (CLERK INTEGRATION)
+// ==========================================
+
+enum UserRole {
+  STUDENT
+  TEACHER
+  ADMIN
+}
+
+model User {
+  id            String    @id @default(cuid())
+  userId        String    @unique // Clerk User ID
+  name          String?
+  email         String?   @unique
+  imageUrl      String?   @db.Text
+  bio           String?   @db.Text
+  role          UserRole  @default(STUDENT)
+  
+  // Gamificación estilo Skool
+  points        Int       @default(0)
+  level         Int       @default(1)
+
+  // Relaciones
+  courses       Course[]          // Cursos creados (si es TEACHER/ADMIN)
+  userProgress  UserProgress[]
+  purchases     Purchase[]
+  posts         CommunityPost[]
+  comments      Comment[]
+  postLikes     PostLike[]
+  commentLikes  CommentLike[]
+  stripeCustomer StripeCustomer?
+  subscription  Subscription?
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([role])
+}
+
+// ==========================================
+// 2. FACULTADES Y CATEGORÍAS ACADÉMICAS
+// ==========================================
+
+enum FacultyType {
+  MATHEMATICS // Álgebra, Aritmética, Geometría, Trigonometría, RM
+  SCIENCES    // Física, Química, Biología
+  HUMANITIES  // RV, Geografía, Historia del Perú
+}
+
+model Faculty {
+  id          String        @id @default(cuid())
+  type        FacultyType   @unique
+  name        String        // Ej: "Facultad de Matemáticas"
+  slug        String        @unique // "matematicas", "ciencias", "humanidades"
+  description String?       @db.Text
+  icon        String?       // Lucide icon name
+  color       String?       // Código hex o clase tailwind para tema visual
+
+  categories  Category[]
+  courses     Course[]
+  posts       CommunityPost[]
+
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
+
+model Category {
+  id          String        @id @default(cuid())
+  name        String        // Ej: "Álgebra", "Física", "Historia del Perú"
+  slug        String        @unique // "algebra", "fisica", "historia-del-peru"
+  description String?       @db.Text
+  facultyId   String
+  faculty     Faculty       @relation(fields: [facultyId], references: [id], onDelete: Cascade)
+
+  courses     Course[]
+  posts       CommunityPost[]
+
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([facultyId])
+}
+
+// ==========================================
+// 3. CURSOS Y CAPÍTULOS (ESTILO SKILLSHARE / ANTONIO ERDELJAC)
+// ==========================================
+
+enum CourseLevel {
+  BASIC
+  INTERMEDIATE
+  ADVANCED
+  PRE_UNIVERSITY
+}
+
+model Course {
+  id          String        @id @default(cuid())
+  userId      String        // Creador del curso (Clerk userId o User.id)
+  author      User          @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  title       String        @db.Text
+  description String?       @db.Text
+  imageUrl    String?       @db.Text
+  price       Float?        // Precio individual (opcional si usa membresía global)
+  level       CourseLevel   @default(PRE_UNIVERSITY)
+  isPublished Boolean       @default(false)
+
+  // Clasificación académica
+  facultyId   String
+  faculty     Faculty       @relation(fields: [facultyId], references: [id])
+  categoryId  String
+  category    Category      @relation(fields: [categoryId], references: [id])
+
+  // Contenido y recursos
+  chapters    Chapter[]
+  attachments Attachment[]
+  purchases   Purchase[]
+
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([facultyId])
+  @@index([categoryId])
+  @@index([userId])
+}
+
+model Chapter {
+  id          String        @id @default(cuid())
+  title       String
+  description String?       @db.Text
+  videoUrl    String?       @db.Text
+  position    Int
+  isPublished Boolean       @default(false)
+  isFree      Boolean       @default(false) // Clase de prueba gratuita
+
+  // Streaming con Mux
+  muxData     MuxData?
+
+  courseId    String
+  course      Course        @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  userProgress UserProgress[]
+
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([courseId])
+}
+
+model MuxData {
+  id          String   @id @default(cuid())
+  assetId     String
+  playbackId  String?
+  duration    Float?   // Duración en segundos calculada por Mux
+  chapterId   String   @unique
+  chapter     Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+}
+
+model Attachment {
+  id        String   @id @default(cuid())
+  name      String   // Ej: "Guia_Ejercicios_Algebra_Semana1.pdf"
+  url       String   @db.Text
+  courseId  String
+  course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([courseId])
+}
+
+// ==========================================
+// 4. PROGRESO Y ANALÍTICAS DEL ESTUDIANTE
+// ==========================================
+
+model UserProgress {
+  id              String   @id @default(cuid())
+  userId          String   // Clerk User ID
+  user            User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  chapterId       String
+  chapter         Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  
+  isCompleted     Boolean  @default(false)
+  watchedSeconds  Int      @default(0) // Tiempo de visualización acumulado
+  lastWatchedAt   DateTime @default(now())
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([userId, chapterId])
+  @@index([chapterId])
+  @@index([userId])
+}
+
+// ==========================================
+// 5. MONETIZACIÓN Y PAGOS (STRIPE)
+// ==========================================
+
+model StripeCustomer {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  user             User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  stripeCustomerId String   @unique
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+enum SubscriptionStatus {
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  UNPAID
+}
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  userId               String             @unique
+  user                 User               @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  stripeSubscriptionId String             @unique
+  stripePriceId        String
+  stripeCurrentPeriodEnd DateTime
+  status               SubscriptionStatus @default(ACTIVE)
+
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+}
+
+model Purchase {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  courseId  String
+  course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, courseId])
+  @@index([courseId])
+}
+
+// ==========================================
+// 6. COMUNIDAD Y FOROS (ESTILO SKOOL)
+// ==========================================
+
+model CommunityPost {
+  id            String       @id @default(cuid())
+  title         String
+  content       String       @db.Text
+  isPinned      Boolean      @default(false)
+  
+  // Autor del post
+  authorId      String
+  author        User         @relation(fields: [authorId], references: [userId], onDelete: Cascade)
+
+  // Canal de la comunidad: vinculado a facultad y/o materia específica
+  facultyId     String
+  faculty       Faculty      @relation(fields: [facultyId], references: [id], onDelete: Cascade)
+  categoryId    String?
+  category      Category?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  comments      Comment[]
+  likes         PostLike[]
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([facultyId])
+  @@index([categoryId])
+  @@index([authorId])
+}
+
+model Comment {
+  id          String        @id @default(cuid())
+  content     String        @db.Text
+  
+  postId      String
+  post        CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  authorId    String
+  author      User          @relation(fields: [authorId], references: [userId], onDelete: Cascade)
+
+  // Hilos anidados estilo Skool/Reddit
+  parentId    String?
+  parent      Comment?      @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies     Comment[]     @relation("CommentReplies")
+
+  likes       CommentLike[]
+
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([postId])
+  @@index([authorId])
+  @@index([parentId])
+}
+
+model PostLike {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  postId    String
+  post      CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime      @default(now())
+
+  @@unique([userId, postId])
+  @@index([postId])
+}
+
+model CommentLike {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  commentId String
+  comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, commentId])
+  @@index([commentId])
+}
